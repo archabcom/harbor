@@ -158,11 +158,7 @@ func (c *controller) Get(ctx context.Context, id int, opt *Option) (*commonmodel
 	if err != nil {
 		return nil, err
 	}
-	sctx, _ := security.FromContext(ctx)
-	lsc, ok := sctx.(*local.SecurityContext)
-	if ok && lsc.User() != nil && lsc.User().UserID == id {
-		u.AdminRoleInAuth = lsc.User().AdminRoleInAuth
-	}
+	overlayAdminRoleInAuth(ctx, []*commonmodels.User{u})
 	if opt != nil && opt.WithOIDCInfo {
 		oidcMeta, err := c.oidcMetaMgr.GetByUserID(ctx, id)
 		if err != nil {
@@ -225,7 +221,33 @@ func (c *controller) Delete(ctx context.Context, id int) error {
 }
 
 func (c *controller) List(ctx context.Context, query *q.Query, options ...models.Option) ([]*commonmodels.User, error) {
-	return c.mgr.List(ctx, query, options...)
+	users, err := c.mgr.List(ctx, query, options...)
+	if err != nil {
+		return nil, err
+	}
+	// admin_role_in_auth is not stored. It is taken from the current login
+	// session, and only for that user (see UserResp in the API spec).
+	overlayAdminRoleInAuth(ctx, users)
+	return users, nil
+}
+
+// overlayAdminRoleInAuth copies the IdP admin role from the current session
+// onto that same user. Other users stay false: membership is not persisted.
+func overlayAdminRoleInAuth(ctx context.Context, users []*commonmodels.User) {
+	if len(users) == 0 {
+		return
+	}
+	sctx, _ := security.FromContext(ctx)
+	lsc, ok := sctx.(*local.SecurityContext)
+	if !ok || lsc.User() == nil {
+		return
+	}
+	current := lsc.User()
+	for _, u := range users {
+		if u != nil && u.UserID == current.UserID {
+			u.AdminRoleInAuth = current.AdminRoleInAuth
+		}
+	}
 }
 
 func (c *controller) UpdatePassword(ctx context.Context, id int, password string) error {

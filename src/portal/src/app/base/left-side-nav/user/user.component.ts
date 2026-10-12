@@ -165,14 +165,15 @@ export class UserComponent implements OnDestroy {
         if (!u) {
             return '{{MISS}}';
         }
-        let key: string = u.sysadmin_flag
-            ? 'USER.IS_ADMIN'
-            : 'USER.IS_NOT_ADMIN';
+        const idpAdmin = !!u.admin_role_in_auth;
+        let key: string =
+            u.sysadmin_flag || idpAdmin ? 'USER.IS_ADMIN' : 'USER.IS_NOT_ADMIN';
         const appConfig = this.appConfigService.getConfig();
         if (
             appConfig &&
             appConfig.auth_mode !== CONFIG_AUTH_MODE.DB_AUTH &&
-            !u.sysadmin_flag
+            !u.sysadmin_flag &&
+            !idpAdmin
         ) {
             key = 'USER.UNKNOWN';
         }

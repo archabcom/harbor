@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -373,10 +372,26 @@ func UserInfoFromIDToken(ctx context.Context, token *Token, setting cfgModels.OI
 	return userInfoFromClaims(idt, setting)
 }
 
+// baseUserClaims are the standard claims copied onto UserInfo.
+// Groups are decoded separately. Some providers send a single group as a string,
+// which cannot be unmarshaled into []string and would fail the whole login.
+type baseUserClaims struct {
+	Issuer   string `json:"iss"`
+	Subject  string `json:"sub"`
+	Username string `json:"name"`
+	Email    string `json:"email"`
+}
+
 func userInfoFromClaims(c claimsProvider, setting cfgModels.OIDCSetting) (*UserInfo, error) {
-	res := &UserInfo{}
-	if err := c.Claims(res); err != nil {
+	base := &baseUserClaims{}
+	if err := c.Claims(base); err != nil {
 		return nil, err
+	}
+	res := &UserInfo{
+		Issuer:   base.Issuer,
+		Subject:  base.Subject,
+		Username: base.Username,
+		Email:    base.Email,
 	}
 	if setting.UserClaim != "" {
 		allClaims := make(map[string]any)
@@ -394,12 +409,24 @@ func userInfoFromClaims(c claimsProvider, setting cfgModels.OIDCSetting) (*UserI
 		}
 	}
 	res.Groups, res.hasGroupClaim = groupsFromClaims(c, setting.GroupsClaim)
-	if len(setting.AdminGroup) > 0 {
-		if slices.Contains(res.Groups, setting.AdminGroup) {
-			res.AdminGroupMember = true
+	res.AdminGroupMember = inAdminGroup(res.Groups, setting.AdminGroup)
+	return res, nil
+}
+
+// inAdminGroup reports whether groups contains the configured OIDC admin group.
+// Comparison ignores surrounding whitespace and case so a group claim of
+// "Harbor-Admin" still matches an admin group setting of "harbor-admin".
+func inAdminGroup(groups []string, adminGroup string) bool {
+	adminGroup = strings.TrimSpace(adminGroup)
+	if adminGroup == "" {
+		return false
+	}
+	for _, group := range groups {
+		if strings.EqualFold(strings.TrimSpace(group), adminGroup) {
+			return true
 		}
 	}
-	return res, nil
+	return false
 }
 
 // groupsFromClaims fetches the group name list from claimprovider, such as decoded ID token.
@@ -429,14 +456,14 @@ func groupsFromClaims(gp claimsProvider, k string) ([]string, bool) {
 				log.Warningf("Element in group list is not string: %v, list: %v", e, g)
 				continue
 			}
-			res = append(res, s)
+			res = append(res, strings.TrimSpace(s))
 		}
 		return res, true
 	}
 
 	// Try to handle as single string (single group)
 	if s, ok := claim.(string); ok {
-		res = append(res, s)
+		res = append(res, strings.TrimSpace(s))
 		return res, true
 	}
 
@@ -478,6 +505,9 @@ func filterGroup(groupNames []string, filter string) []string {
 }
 
 // InjectGroupsToUser populates the group to DB and inject the group IDs to user model.
+// AdminRoleInAuth is set from the IdP admin-group membership for this login.
+// It is not a database column: callers persist it on the session (or per-request
+// security context). SysAdminFlag, the local admin override, is left unchanged.
 // The third optional parm is for UT only.
 func InjectGroupsToUser(info *UserInfo, user *models.User, f ...populate) {
 	if info == nil || user == nil {

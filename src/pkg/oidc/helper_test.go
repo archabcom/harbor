@@ -304,6 +304,64 @@ func TestUserInfoFromClaims(t *testing.T) {
 				AdminGroupMember:    false,
 			},
 		},
+		{
+			// A single group is sometimes a string. When that string is the
+			// admin group and the claim key is "groups", login must still
+			// succeed and grant admin. Decoding groups into []string would fail.
+			input: map[string]any{
+				"name":   "ada",
+				"email":  "ada@example.com",
+				"groups": "harbor-admin",
+			},
+			setting: cfgModels.OIDCSetting{
+				Name:        "t5",
+				GroupsClaim: "groups",
+				AdminGroup:  "harbor-admin",
+			},
+			expect: &UserInfo{
+				Username:         "ada",
+				Email:            "ada@example.com",
+				Groups:           []string{"harbor-admin"},
+				AdminGroupMember: true,
+				hasGroupClaim:    true,
+			},
+		},
+		{
+			// Surrounding space and case must not hide admin membership.
+			input: map[string]any{
+				"name":   "ada",
+				"groups": []any{" Harbor-Admin "},
+			},
+			setting: cfgModels.OIDCSetting{
+				Name:        "t6",
+				GroupsClaim: "groups",
+				AdminGroup:  " harbor-admin ",
+			},
+			expect: &UserInfo{
+				Username:         "ada",
+				Groups:           []string{"Harbor-Admin"},
+				AdminGroupMember: true,
+				hasGroupClaim:    true,
+			},
+		},
+		{
+			// Leaving the admin group clears the flag on the next login.
+			input: map[string]any{
+				"name":   "ada",
+				"groups": []any{"harbor-users"},
+			},
+			setting: cfgModels.OIDCSetting{
+				Name:        "t7",
+				GroupsClaim: "groups",
+				AdminGroup:  "harbor-admin",
+			},
+			expect: &UserInfo{
+				Username:         "ada",
+				Groups:           []string{"harbor-users"},
+				AdminGroupMember: false,
+				hasGroupClaim:    true,
+			},
+		},
 	}
 	for _, tc := range s {
 		out, err := userInfoFromClaims(&fakeClaims{tc.input}, tc.setting)
@@ -539,6 +597,56 @@ func TestInjectGroupsToUser(t *testing.T) {
 				Username:        "jim",
 				Email:           "jim@gmail.com",
 				GroupIDs:        []int{1, 2},
+				AdminRoleInAuth: true,
+			},
+		},
+		{
+			// Re-login after leaving the admin group drops IdP admin.
+			// A locally granted SysAdminFlag is kept.
+			userInfo: &UserInfo{
+				Username:         "jim",
+				Email:            "jim@gmail.com",
+				Groups:           []string{},
+				hasGroupClaim:    true,
+				AdminGroupMember: false,
+			},
+			old: &models.User{
+				Username:        "jim",
+				Email:           "jim@gmail.com",
+				GroupIDs:        []int{},
+				SysAdminFlag:    true,
+				AdminRoleInAuth: true,
+			},
+			new: &models.User{
+				Username:        "jim",
+				Email:           "jim@gmail.com",
+				GroupIDs:        []int{},
+				SysAdminFlag:    true,
+				AdminRoleInAuth: false,
+			},
+		},
+		{
+			// Re-login after joining the admin group grants IdP admin
+			// without turning on the local sysadmin flag.
+			userInfo: &UserInfo{
+				Username:         "jim",
+				Email:            "jim@gmail.com",
+				Groups:           []string{"1"},
+				hasGroupClaim:    true,
+				AdminGroupMember: true,
+			},
+			old: &models.User{
+				Username:        "jim",
+				Email:           "jim@gmail.com",
+				GroupIDs:        []int{},
+				SysAdminFlag:    false,
+				AdminRoleInAuth: false,
+			},
+			new: &models.User{
+				Username:        "jim",
+				Email:           "jim@gmail.com",
+				GroupIDs:        []int{1},
+				SysAdminFlag:    false,
 				AdminRoleInAuth: true,
 			},
 		},
