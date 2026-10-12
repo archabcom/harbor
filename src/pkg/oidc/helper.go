@@ -410,9 +410,6 @@ func userInfoFromClaims(c claimsProvider, setting cfgModels.OIDCSetting) (*UserI
 	return res, nil
 }
 
-// inAdminGroup reports whether groups contains the configured OIDC admin group.
-// Comparison ignores surrounding whitespace and case so a group claim of
-// "Harbor-Admin" still matches an admin group setting of "harbor-admin".
 func inAdminGroup(groups []string, adminGroup string) bool {
 	adminGroup = strings.TrimSpace(adminGroup)
 	if adminGroup == "" {
@@ -453,14 +450,14 @@ func groupsFromClaims(gp claimsProvider, k string) ([]string, bool) {
 				log.Warningf("Element in group list is not string: %v, list: %v", e, g)
 				continue
 			}
-			res = append(res, strings.TrimSpace(s))
+			res = append(res, s)
 		}
 		return res, true
 	}
 
 	// Try to handle as single string (single group)
 	if s, ok := claim.(string); ok {
-		res = append(res, strings.TrimSpace(s))
+		res = append(res, s)
 		return res, true
 	}
 
@@ -502,9 +499,6 @@ func filterGroup(groupNames []string, filter string) []string {
 }
 
 // InjectGroupsToUser populates the group to DB and inject the group IDs to user model.
-// AdminRoleInAuth is set from the IdP admin-group membership for this login.
-// It is not a database column: callers persist it on the session (or per-request
-// security context). SysAdminFlag, the local admin override, is left unchanged.
 // The third optional parm is for UT only.
 func InjectGroupsToUser(info *UserInfo, user *models.User, f ...populate) {
 	if info == nil || user == nil {

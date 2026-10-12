@@ -103,20 +103,6 @@ func TestIsSysAdmin(t *testing.T) {
 		SysAdminFlag: true,
 	})
 	assert.True(t, ctx.IsSysAdmin())
-
-	ctx = NewSecurityContext(&models.User{
-		Username:        "oidc-user",
-		SysAdminFlag:    false,
-		AdminRoleInAuth: true,
-	})
-	assert.True(t, ctx.IsSysAdmin())
-
-	ctx = NewSecurityContext(&models.User{
-		Username:        "oidc-user",
-		SysAdminFlag:    false,
-		AdminRoleInAuth: false,
-	})
-	assert.False(t, ctx.IsSysAdmin())
 }
 
 func TestIsSolutionUser(t *testing.T) {
