@@ -25,6 +25,7 @@ import (
 
 	"github.com/goharbor/harbor/src/jobservice/common/rds"
 	"github.com/goharbor/harbor/src/jobservice/env"
+	"github.com/goharbor/harbor/src/jobservice/errs"
 	"github.com/goharbor/harbor/src/jobservice/job"
 	"github.com/goharbor/harbor/src/jobservice/logger"
 	"github.com/goharbor/harbor/src/lib/errors"
@@ -98,6 +99,14 @@ func (ba *basicAgent) Trigger(evt *Event) error {
 	// Exponential backoff is used and the max elapsed time is 5m.
 	// If it is still failed to send hook event after all tries, the reaper may help to fix the inconsistent status.
 	if err := ba.client.SendEvent(evt); err != nil {
+		// A 404 for a status change older than the retry window cannot be the
+		// "task row not committed yet" race. Retrying it only repeats a
+		// delivery that can never succeed (issue #23793).
+		if abandonRetry(evt, err) {
+			logger.Infof("Hook event is abandoned as the target no longer exists: %s->%s", evt.Message, evt.URL)
+			return errors.Wrap(err, "trigger hook event error")
+		}
+
 		// Start retry at background.
 		go ba.retry(evt)
 
@@ -139,18 +148,31 @@ func (ba *basicAgent) retry(evt *Event) {
 		logger.Debugf("Retry: sending hook event: %s->%s", evt.Message, evt.URL)
 
 		// Try to avoid sending outdated events, just a try-best operation.
-		ot, err := ba.isOutdated(evt)
-		if err != nil {
+		ot, checkErr := ba.isOutdated(evt)
+		if checkErr != nil {
 			// Log error and continue.
-			logger.Error(err)
-		} else {
-			if ot {
-				logger.Infof("Hook event is abandoned as it's outdated: %s->%s", evt.Message, evt.URL)
-				return nil
-			}
+			logger.Error(checkErr)
+		} else if ot {
+			logger.Infof("Hook event is abandoned as it's outdated: %s->%s", evt.Message, evt.URL)
+			return nil
 		}
 
-		return ba.client.SendEvent(evt)
+		sendErr := ba.client.SendEvent(evt)
+		if sendErr == nil {
+			// ACK the event as Trigger does. A retry that gets through used to
+			// leave the status un-ACKed, so the reaper fired the same hook again
+			// on its next pass and the job stayed in the in-progress track.
+			if ackErr := ba.ack(evt); ackErr != nil {
+				// Just log error
+				logger.Error(errors.Wrap(ackErr, "hook event ack error"))
+			}
+			return nil
+		}
+		if abandonRetry(evt, sendErr) {
+			logger.Infof("Hook event is abandoned as the target no longer exists: %s->%s", evt.Message, evt.URL)
+			return nil
+		}
+		return sendErr
 	}, bf, func(e error, d time.Duration) {
 		logger.Errorf("Retry: sending hook event error: %s, evt=%s->%s, duration=%v", e.Error(), evt.Message, evt.URL, d)
 	})
@@ -255,6 +277,36 @@ func (ba *basicAgent) isOutdated(evt *Event) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// abandonRetry reports whether a failed delivery should not be retried.
+//
+// Core returns 404 when a status hook arrives before the task row is committed,
+// and jobservice retries that race for errRetryBackoff. The same 404 is also
+// what core returns after the execution sweep has deleted the task. Once the
+// status change itself is older than the retry window, the race cannot explain
+// the 404, and further attempts only produce the unbounded error loop in #23793.
+func abandonRetry(evt *Event, err error) bool {
+	if !errs.IsObjectNotFoundError(err) {
+		return false
+	}
+	updatedAt := hookUpdateTime(evt)
+	if updatedAt <= 0 {
+		return false
+	}
+	return time.Unix(updatedAt, 0).Add(errRetryBackoff).Before(time.Now())
+}
+
+// hookUpdateTime is when the status change was recorded. The hook timestamp is
+// the fallback for events whose metadata does not carry update_time.
+func hookUpdateTime(evt *Event) int64 {
+	if evt == nil {
+		return 0
+	}
+	if evt.Data != nil && evt.Data.Metadata != nil && evt.Data.Metadata.UpdateTime > 0 {
+		return evt.Data.Metadata.UpdateTime
+	}
+	return evt.Timestamp
 }
 
 func newBackoff(maxElapsedTime time.Duration) backoff.BackOff {

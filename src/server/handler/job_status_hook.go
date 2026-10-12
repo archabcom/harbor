@@ -44,9 +44,11 @@ func (j *jobStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := j.handler.Handle(r.Context(), sc); err != nil {
 		// When the status hook comes, the execution/task database record may not insert yet
-		// because of that the transaction isn't committed
-		// Do not ignore the NotFoundErr here to make jobservice resend the status hook
-		// again to avoid the status lost
+		// because of that the transaction isn't committed.
+		// Do not ignore the NotFoundErr here: jobservice retries that race for a short
+		// window so the status is not lost, and stops once the status change is older
+		// than the window (the task was removed by the execution sweep). Ignoring every
+		// 404 would drop the status of a task that is about to be committed.
 		/*
 			// ignore the not found error to avoid the jobservice re-sending the hook
 			if errors.IsNotFoundErr(err) {

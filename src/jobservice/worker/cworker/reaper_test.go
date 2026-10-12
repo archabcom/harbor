@@ -23,11 +23,13 @@ import (
 
 	"github.com/gomodule/redigo/redis"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/goharbor/harbor/src/jobservice/common/list"
 	"github.com/goharbor/harbor/src/jobservice/common/rds"
 	"github.com/goharbor/harbor/src/jobservice/common/utils"
+	"github.com/goharbor/harbor/src/jobservice/config"
 	"github.com/goharbor/harbor/src/jobservice/job"
 	"github.com/goharbor/harbor/src/jobservice/tests"
 )
@@ -104,6 +106,21 @@ func (suite *ReaperTestSuite) SetupSuite() {
 	tk := rds.KeyJobTrackInProgress(suite.namespace)
 	_, err = conn.Do("HSET", tk, suite.jid, 1)
 	suite.NoError(err, "mock in-progress track")
+
+	// Every syncOutdatedStats pass scans this record. Register the tracker up
+	// front so later tests are not ordered behind TestSyncOutdatedStats.
+	tracked := job.NewBasicTrackerWithID(
+		context.TODO(),
+		suite.jid,
+		suite.namespace,
+		suite.pool,
+		func(hookURL string, change *job.StatusChange) error {
+			return nil
+		},
+		list.New())
+	err = tracked.Load()
+	suite.NoError(err, "track job stats")
+	suite.ctl.On("Track", suite.jid).Return(tracked, nil)
 }
 
 // TearDownSuite clears down the test suite environment
@@ -160,6 +177,117 @@ func (suite *ReaperTestSuite) TestSyncOutdatedStats() {
 	status, err := redis.String(conn.Do("HGET", rds.KeyJobStats(suite.namespace, suite.jid), "status"))
 	suite.NoError(err, "get status")
 	suite.Equal(job.SuccessStatus.String(), status, "check status")
+}
+
+func (suite *ReaperTestSuite) TestSyncOutdatedStatsGiveUpStaleHook() {
+	// A task whose status hook is never ACKed (the task row was removed while
+	// the hook was pending). Once that change is older than MaxUpdateDuration,
+	// the reaper must untrack it and must not fire the hook again.
+	jid := utils.MakeIdentifier()
+	stale := time.Now().Add(-(config.MaxUpdateDuration() + time.Hour)).Unix()
+	err := mockUnackedJobStats(suite.pool, suite.namespace, jid, stale)
+	suite.NoError(err, "mock stale job stats")
+
+	fired := 0
+	mt := job.NewBasicTrackerWithID(
+		context.TODO(),
+		jid,
+		suite.namespace,
+		suite.pool,
+		func(hookURL string, change *job.StatusChange) error {
+			fired++
+			return nil
+		},
+		list.New())
+	err = mt.Load()
+	suite.NoError(err, "track stale job stats")
+	suite.ctl.On("Track", jid).Return(mt, nil)
+
+	err = suite.r.syncOutdatedStats()
+	suite.NoError(err, "sync outdated stats with stale hook")
+	suite.Equal(0, fired, "stale unACKed hook must not be re-fired")
+
+	conn := suite.pool.Get()
+	defer func() {
+		_ = conn.Close()
+	}()
+	v, err := redis.Int(conn.Do("HEXISTS", rds.KeyJobTrackInProgress(suite.namespace), jid))
+	suite.NoError(err, "check in-progress track")
+	suite.Equal(0, v, "stale unACKed job should be untracked")
+}
+
+func (suite *ReaperTestSuite) TestSyncOutdatedStatsKeepsFreshHook() {
+	// A recently updated job whose hook is not ACKed yet must still be re-fired.
+	jid := utils.MakeIdentifier()
+	err := mockUnackedJobStats(suite.pool, suite.namespace, jid, time.Now().Unix())
+	suite.NoError(err, "mock fresh job stats")
+
+	fired := 0
+	mt := job.NewBasicTrackerWithID(
+		context.TODO(),
+		jid,
+		suite.namespace,
+		suite.pool,
+		func(hookURL string, change *job.StatusChange) error {
+			fired++
+			return nil
+		},
+		list.New())
+	err = mt.Load()
+	suite.NoError(err, "track fresh job stats")
+	suite.ctl.On("Track", jid).Return(mt, nil)
+
+	err = suite.r.syncOutdatedStats()
+	suite.NoError(err, "sync outdated stats with fresh hook")
+	suite.Equal(1, fired, "fresh unACKed hook should be re-fired once")
+
+	conn := suite.pool.Get()
+	defer func() {
+		_ = conn.Close()
+	}()
+	v, err := redis.Int(conn.Do("HEXISTS", rds.KeyJobTrackInProgress(suite.namespace), jid))
+	suite.NoError(err, "check in-progress track")
+	suite.Equal(1, v, "fresh unACKed job should stay tracked")
+}
+
+func TestStatusUnackedTooLong(t *testing.T) {
+	require.False(t, statusUnackedTooLong(nil))
+	require.False(t, statusUnackedTooLong(&job.StatsInfo{}))
+	require.False(t, statusUnackedTooLong(&job.StatsInfo{UpdateTime: time.Now().Unix()}))
+	require.False(t, statusUnackedTooLong(&job.StatsInfo{Revision: time.Now().Unix()}))
+	stale := time.Now().Add(-(config.MaxUpdateDuration() + time.Hour)).Unix()
+	require.True(t, statusUnackedTooLong(&job.StatsInfo{UpdateTime: stale}))
+	require.True(t, statusUnackedTooLong(&job.StatsInfo{Revision: stale}))
+}
+
+func mockUnackedJobStats(pool *redis.Pool, ns string, jid string, updateTime int64) error {
+	c := pool.Get()
+	defer func() {
+		_ = c.Close()
+	}()
+
+	rev := updateTime
+	if rev <= 0 {
+		rev = time.Now().Unix()
+	}
+	args := []any{
+		rds.KeyJobStats(ns, jid),
+		"id", jid,
+		"status", job.SuccessStatus.String(),
+		"name", job.SampleJob,
+		"kind", job.KindGeneric,
+		"unique", 0,
+		"ref_link", fmt.Sprintf("/api/v1/jobs/%s", jid),
+		"enqueue_time", updateTime,
+		"update_time", updateTime,
+		"revision", rev,
+		"web_hook_url", "http://example.test/hook",
+	}
+	if _, err := c.Do("HMSET", args...); err != nil {
+		return err
+	}
+	_, err := c.Do("HSET", rds.KeyJobTrackInProgress(ns), jid, 1)
+	return err
 }
 
 func mockJobData() (string, error) {

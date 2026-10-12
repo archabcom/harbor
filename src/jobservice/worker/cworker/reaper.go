@@ -185,8 +185,31 @@ func (r *reaper) syncOutdatedStats() error {
 				// Exit as it is still a valid ongoing job
 			}
 		} else if diff > 0 {
-			// The hook event of current job status is not ACKed
-			// Resend hook event by set the status again
+			// The hook event of current job status is not ACKed.
+			// Resend hook event by set the status again.
+			//
+			// Give up once the change has stayed un-ACKed for MaxUpdateDuration.
+			// Re-firing past that point never converges: the task row was removed
+			// by the execution sweep (core answers 404) or the endpoint is gone,
+			// and each pass starts another retry burst. That loop is what fills
+			// job_track:inprogress and the jobservice logs (issues #23793, #23785).
+			// Untracking stops the reaper from visiting the job again. It does not
+			// mark the job failed — doing so would record a new status change and
+			// start the same hook over.
+			if statusUnackedTooLong(t.Job().Info) {
+				logger.Infof(
+					"Reaper: give up re-firing hook for job %s as status change is not ACKed within %s: %s(rev=%d)",
+					t.Job().Info.JobID,
+					config.MaxUpdateDuration(),
+					t.Job().Info.Status,
+					t.Job().Info.Revision,
+				)
+				if err = r.unTrackInProgress(t.Job().Info.JobID); err != nil {
+					return
+				}
+				return nil
+			}
+
 			if err = t.FireHook(); err != nil {
 				return
 			}
@@ -351,6 +374,24 @@ func (r *reaper) requeueInProgressJobs(poolID string, jobTypes []string) error {
 			return fmt.Errorf("need 3 elements back")
 		}
 	}
+}
+
+// statusUnackedTooLong reports whether a status change has waited longer than
+// MaxUpdateDuration without an ACK. UpdateTime is when the stats were last
+// written; revision is a unix timestamp of the status generation and is used
+// when update_time was never stored.
+func statusUnackedTooLong(info *job.StatsInfo) bool {
+	if info == nil {
+		return false
+	}
+	ts := info.UpdateTime
+	if ts <= 0 {
+		ts = info.Revision
+	}
+	if ts <= 0 {
+		return false
+	}
+	return time.Unix(ts, 0).Add(config.MaxUpdateDuration()).Before(time.Now())
 }
 
 // compare the status and the status in the ack

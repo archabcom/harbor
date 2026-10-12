@@ -26,6 +26,7 @@ import (
 	"time"
 
 	commonhttp "github.com/goharbor/harbor/src/common/http"
+	"github.com/goharbor/harbor/src/jobservice/errs"
 	"github.com/goharbor/harbor/src/lib/log"
 )
 
@@ -113,6 +114,14 @@ func (bc *basicClient) SendEvent(evt *Event) error {
 
 	// Should be 200
 	if res.StatusCode != http.StatusOK {
+		// 404 means the subscribed target no longer exists (the task was removed
+		// by the execution sweep, or the hook arrived before the task row was
+		// committed). Callers retry the second case briefly and give up on the
+		// first; a typed not-found error is what lets them tell the two apart.
+		if res.StatusCode == http.StatusNotFound {
+			return errs.NoObjectFoundError(notFoundDetail(evt, res.Body))
+		}
+
 		if res.ContentLength > 0 {
 			// read error content and return
 			dt, err := io.ReadAll(res.Body)
@@ -126,4 +135,27 @@ func (bc *basicClient) SendEvent(evt *Event) error {
 	}
 
 	return nil
+}
+
+// notFoundDetail builds the object description for a 404 hook response.
+// The response body is included when core sent one, so the log still shows
+// the "task with job ID ... not found" message.
+func notFoundDetail(evt *Event, body io.Reader) string {
+	detail := ""
+	if evt != nil && evt.Data != nil {
+		detail = evt.Data.JobID
+	}
+
+	dt, err := io.ReadAll(io.LimitReader(body, 4096))
+	if err != nil {
+		return detail
+	}
+	msg := strings.TrimSpace(string(dt))
+	if msg == "" {
+		return detail
+	}
+	if detail == "" {
+		return msg
+	}
+	return detail + ": " + msg
 }
