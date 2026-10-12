@@ -29,7 +29,6 @@ export class User {
     role_name?: string;
     role_id?: number;
     sysadmin_flag?: boolean;
-    admin_role_in_auth?: boolean;
     reset_uuid?: string;
     creation_time?: string;
     update_time?: string;
