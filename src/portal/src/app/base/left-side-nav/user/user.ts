@@ -29,8 +29,6 @@ export class User {
     role_name?: string;
     role_id?: number;
     sysadmin_flag?: boolean;
-    // Set for the current login user when an external authenticator (OIDC/LDAP)
-    // granted admin for this session. Not stored for other users.
     admin_role_in_auth?: boolean;
     reset_uuid?: string;
     creation_time?: string;

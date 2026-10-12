@@ -104,7 +104,6 @@ func TestIsSysAdmin(t *testing.T) {
 	})
 	assert.True(t, ctx.IsSysAdmin())
 
-	// OIDC/LDAP admin group membership is session-scoped and is enough on its own.
 	ctx = NewSecurityContext(&models.User{
 		Username:        "oidc-user",
 		SysAdminFlag:    false,
@@ -112,7 +111,6 @@ func TestIsSysAdmin(t *testing.T) {
 	})
 	assert.True(t, ctx.IsSysAdmin())
 
-	// Leaving the admin group clears that session role.
 	ctx = NewSecurityContext(&models.User{
 		Username:        "oidc-user",
 		SysAdminFlag:    false,

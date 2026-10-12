@@ -372,9 +372,6 @@ func UserInfoFromIDToken(ctx context.Context, token *Token, setting cfgModels.OI
 	return userInfoFromClaims(idt, setting)
 }
 
-// baseUserClaims are the standard claims copied onto UserInfo.
-// Groups are decoded separately. Some providers send a single group as a string,
-// which cannot be unmarshaled into []string and would fail the whole login.
 type baseUserClaims struct {
 	Issuer   string `json:"iss"`
 	Subject  string `json:"sub"`

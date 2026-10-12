@@ -225,8 +225,6 @@ func (c *controller) List(ctx context.Context, query *q.Query, options ...models
 	if err != nil {
 		return nil, err
 	}
-	// admin_role_in_auth is not stored. It is taken from the current login
-	// session, and only for that user (see UserResp in the API spec).
 	overlayAdminRoleInAuth(ctx, users)
 	return users, nil
 }

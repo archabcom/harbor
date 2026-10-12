@@ -208,10 +208,6 @@ func (oc *OIDCController) Callback() {
 		oc.SendError(err)
 		return
 	}
-	// Recompute group membership on every login, including users onboarded
-	// before they joined (or after they left) the OIDC admin group.
-	// AdminRoleInAuth rides on the session user below; it is not written back
-	// to the user row. SysAdminFlag remains the local admin override.
 	oidc.InjectGroupsToUser(info, u)
 	um, err := ctluser.Ctl.Get(ctx, u.UserID, &ctluser.Option{WithOIDCInfo: true})
 	if err != nil {
